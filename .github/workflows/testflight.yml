@@ -1,0 +1,68 @@
+name: TestFlight
+
+# Builds a signed release in the cloud and uploads it to TestFlight; no Mac needed.
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   APPLE_TEAM_ID      Team ID from developer.apple.com/account (Membership details)
+#   ASC_KEY_ID         App Store Connect API key ID
+#   ASC_ISSUER_ID      App Store Connect API issuer ID
+#   ASC_KEY_P8         Full contents of the downloaded AuthKey_XXXX.p8 file
+on:
+  workflow_dispatch:
+
+jobs:
+  testflight:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check secrets
+        env:
+          TEAM: ${{ secrets.APPLE_TEAM_ID }}
+          KID: ${{ secrets.ASC_KEY_ID }}
+          ISS: ${{ secrets.ASC_ISSUER_ID }}
+          P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          missing=""
+          [ -z "$TEAM" ] && missing="$missing APPLE_TEAM_ID"
+          [ -z "$KID" ] && missing="$missing ASC_KEY_ID"
+          [ -z "$ISS" ] && missing="$missing ASC_ISSUER_ID"
+          [ -z "$P8" ] && missing="$missing ASC_KEY_P8"
+          if [ -n "$missing" ]; then echo "::error::Missing secrets:$missing"; exit 1; fi
+
+      - name: Write API key
+        env:
+          P8: ${{ secrets.ASC_KEY_P8 }}
+        run: printf '%s\n' "$P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Archive
+        run: |
+          set -o pipefail
+          xcodebuild -project Almuadhin.xcodeproj -scheme Almuadhin \
+            -configuration Release -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Almuadhin.xcarchive" \
+            DEVELOPMENT_TEAM="${{ secrets.APPLE_TEAM_ID }}" CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" \
+            archive | tail -n 80
+
+      - name: Upload to TestFlight
+        run: |
+          set -o pipefail
+          cp ExportOptions.plist "$RUNNER_TEMP/ExportOptions.plist"
+          /usr/libexec/PlistBuddy -c "Add :teamID string ${{ secrets.APPLE_TEAM_ID }}" "$RUNNER_TEMP/ExportOptions.plist"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Almuadhin.xcarchive" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" \
+            -authenticationKeyID "${{ secrets.ASC_KEY_ID }}" \
+            -authenticationKeyIssuerID "${{ secrets.ASC_ISSUER_ID }}" | tail -n 80
